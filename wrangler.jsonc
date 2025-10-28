@@ -14,13 +14,6 @@
           "database_id": "3b45cf63-577a-41aa-9d3e-c99b9a159d89"
         }
     ],
-    "secrets_store_secrets": [
-        {
-            "store_id": "3d819d2a94fc45aaa68111dcac860d61",
-            "binding": "SECRET",
-            "secret_name": "outbox-tek-api-secret"
-        }
-    ],
 	"observability": {
 		"enabled": true
 	}

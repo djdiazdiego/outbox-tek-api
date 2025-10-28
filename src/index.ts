@@ -1,10 +1,11 @@
 import { Hono, Context, Next } from "hono";
 import { cors } from "hono/cors";
-import { handleRest } from './rest';
+// import { handleRest } from './rest';
+import { compileParams, ensureReadOnly, ensureSingleStatement } from "./sql";
+import { fromBase64, safeJsonParse } from "./helpers/helpers";
 
 export interface Env {
-    DB: D1Database;
-    SECRET: SecretsStoreSecret;
+  DB: D1Database;
 }
 
 // # List all users
@@ -28,61 +29,82 @@ export interface Env {
 // DELETE /rest/users/123
 
 export default {
-    async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-        const app = new Hono<{ Bindings: Env }>();
+  async fetch(
+    request: Request,
+    env: Env,
+    ctx: ExecutionContext
+  ): Promise<Response> {
+    const app = new Hono<{ Bindings: Env }>();
 
-        // Apply CORS to all routes
-        app.use('*', async (c, next) => {
-            return cors()(c, next);
-        })
+    // Apply CORS to all routes
+    app.use("*", async (c, next) => {
+      return cors()(c, next);
+    });
 
-        // Secret Store key value that we have set
-        const secret = await env.SECRET.get();
+    const authMiddleware = async (c: Context, next: Next) => {
+      return next();
+    };
 
-        // Authentication middleware that verifies the Authorization header
-        // is sent in on each request and matches the value of our Secret key.
-        // If a match is not found we return a 401 and prevent further access.
-        const authMiddleware = async (c: Context, next: Next) => {
-            const authHeader = c.req.header('Authorization');
-            if (!authHeader) {
-                return c.json({ error: 'Unauthorized' }, 401);
-            }
+    // CRUD REST endpoints made available to all of our tables
+    // app.all('/rest/*', authMiddleware, handleRest);
 
-            const token = authHeader.startsWith('Bearer ')
-                ? authHeader.substring(7)
-                : authHeader;
+    app.get("/sql/query", authMiddleware, async (c) => {
+      try {
+        const q = c.req.query("q"); // raw SQL (url-encoded)
+        const paramsRaw = c.req.query("params"); // JSON (url-encoded)
+        if (!q) return c.json({ error: 'Query param "q" is required' }, 400);
 
-            if (token !== secret) {
-                return c.json({ error: 'Unauthorized' }, 401);
-            }
+        ensureSingleStatement(q);
+        ensureReadOnly(q);
 
-            return next();
-        };
+        const params = safeJsonParse<Record<string, unknown> | unknown[]>(
+          paramsRaw ?? null
+        );
+        const { sql, values } = compileParams(q, params);
 
-        // CRUD REST endpoints made available to all of our tables
-        app.all('/rest/*', authMiddleware, handleRest);
+        const results = await env.DB.prepare(sql)
+          .bind(...values)
+          .all();
+        return c.json(results);
+      } catch (err: any) {
+        const message = err?.message ?? "Unexpected error";
+        const isClient =
+          /single statement|only select|forbidden token|invalid json|required/i.test(
+            message
+          );
+        return c.json({ error: message }, isClient ? 400 : 500);
+      }
+    });
 
-        // Execute a raw SQL statement with parameters with this route
-        app.post('/query', authMiddleware, async (c) => {
-            try {
-                const body = await c.req.json();
-                const { query, params } = body;
+    app.get("/sql/qb64", authMiddleware, async (c) => {
+      try {
+        const b64 = c.req.query("b64");
+        const params64 = c.req.query("params64");
+        const q = fromBase64(b64);
+        const params = params64
+          ? safeJsonParse<Record<string, unknown> | unknown[]>(
+              fromBase64(params64)
+            )
+          : undefined;
 
-                if (!query) {
-                    return c.json({ error: 'Query is required' }, 400);
-                }
+        ensureSingleStatement(q);
+        ensureReadOnly(q);
 
-                // Execute the query against D1 database
-                const results = await env.DB.prepare(query)
-                    .bind(...(params || []))
-                    .all();
+        const { sql, values } = compileParams(q, params);
+        const results = await env.DB.prepare(sql)
+          .bind(...values)
+          .all();
+        return c.json(results);
+      } catch (err: any) {
+        const message = err?.message ?? "Unexpected error";
+        const isClient =
+          /single statement|only select|forbidden token|invalid json|missing base64/i.test(
+            message
+          );
+        return c.json({ error: message }, isClient ? 400 : 500);
+      }
+    });
 
-                return c.json(results);
-            } catch (error: any) {
-                return c.json({ error: error.message }, 500);
-            }
-        });
-
-        return app.fetch(request, env, ctx);
-    }
+    return app.fetch(request, env, ctx);
+  },
 } satisfies ExportedHandler<Env>;
